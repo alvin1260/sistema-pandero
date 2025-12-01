@@ -4,3 +4,4 @@ openpyxl
 fpdf
 gspread
 oauth2client
+cloudinary
