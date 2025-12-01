@@ -212,28 +212,42 @@ with st.sidebar:
             st.session_state.usuario = None
             st.rerun()
 
-# 1. LOGIN
+# 1. LOGIN MEJORADO (Con tecla Enter y Botones Rojos)
 if st.session_state.usuario is None:
     c1, c2 = st.columns(2)
+    
     with c1:
-        dni = st.text_input("DNI Socio")
-        if st.button("Ingresar"):
-            df_u = cargar_df(TAB_USUARIOS)
-            if not df_u.empty and dni in df_u['DNI'].values:
-                st.session_state.usuario = dni
-                st.session_state.rol = 'usuario'
-                st.session_state.nombre_pila = df_u[df_u['DNI']==dni].iloc[0]['Nombre']
-                st.rerun()
-            else: st.error("DNI no encontrado en la Nube.")
-    with c2:
-        pk = st.text_input("Clave Admin", type="password")
-        if st.button("Acceder"):
-            if pk == "admin123":
-                st.session_state.usuario = "ADMIN"
-                st.session_state.rol = 'admin'
-                st.session_state.nombre_pila = "Admin"
-                st.rerun()
+        st.subheader("👤 Acceso Socio")
+        # Usamos 'form' para que al dar Enter funcione
+        with st.form("login_socio"):
+            dni = st.text_input("Ingresa tu DNI")
+            # type="primary" pone el botón ROJO
+            btn_ingresar = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+            
+            if btn_ingresar:
+                df_u = cargar_df(TAB_USUARIOS)
+                if not df_u.empty and dni in df_u['DNI'].values:
+                    st.session_state.usuario = dni
+                    st.session_state.rol = 'usuario'
+                    st.session_state.nombre_pila = df_u[df_u['DNI']==dni].iloc[0]['Nombre']
+                    st.rerun()
+                else:
+                    st.error("❌ DNI no encontrado en la base de datos.")
 
+    with c2:
+        st.subheader("🛡️ Acceso Admin")
+        with st.form("login_admin"):
+            pk = st.text_input("Contraseña", type="password")
+            btn_admin = st.form_submit_button("Acceder", type="primary", use_container_width=True)
+            
+            if btn_admin:
+                if pk == "admin123":
+                    st.session_state.usuario = "ADMIN"
+                    st.session_state.rol = 'admin'
+                    st.session_state.nombre_pila = "Admin"
+                    st.rerun()
+                else:
+                    st.error("❌ Contraseña incorrecta")
 # 2. ADMIN
 elif st.session_state.rol == 'admin':
     if 'grupo_sel' not in st.session_state: st.session_state.grupo_sel = None
