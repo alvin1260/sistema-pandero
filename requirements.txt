@@ -1,0 +1,6 @@
+streamlit
+pandas
+openpyxl
+fpdf
+gspread
+oauth2client
