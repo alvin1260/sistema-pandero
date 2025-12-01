@@ -246,7 +246,7 @@ elif st.session_state.rol == 'admin':
                     tag = '½' if r['Tipo']=='Medio' else ''
                     with st.expander(f"T{r['Turno']} | {'🔴' if deuda>0 else '🟢'} {r['Nombre']} {tag}"):
                         c1, c2 = st.columns([3,1])
-                        c1.write(f"DNI: {r['DNI']} | Deuda: {deuda}"); c1.markdown(f"[📲 WhatsApp](https://wa.me/?text=Hola%20{r['Nombre']}%20necesitamos%20tu%20%20pago)")
+                        c1.write(f"DNI: {r['DNI']} | Deuda: {deuda}"); c1.markdown(f"[📲 WhatsApp](https://wa.me/?text=Hola%20{r['Nombre']})")
                         c2.metric("Pagado", f"S/. {sum(c['Monto'] for c in cal if c['Estado']=='green')}")
                         dfv = pd.DataFrame(cal)[['Semana','Fecha','Monto','Estado']]
                         dfv['Monto'] = dfv['Monto'].apply(lambda x: f"S/. {x:.2f}")
@@ -365,3 +365,4 @@ elif st.session_state.rol == 'usuario':
             else: st.success("¡Felicidades! Pagaste todo.")
 
     else: st.warning("Sin grupo")
+
