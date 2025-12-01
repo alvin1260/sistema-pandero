@@ -21,8 +21,6 @@ st.markdown("""
     .half-turn-tag { background-color: #3498db; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-left: 5px; }
     [data-testid="stDataFrame"] th { text-align: center !important; }
     [data-testid="stDataFrame"] td { text-align: center !important; }
-    
-    /* Estilo botón grande */
     .big-btn { width: 100%; padding: 10px; }
     </style>
     """, unsafe_allow_html=True)
@@ -37,18 +35,59 @@ def conectar_db(hoja_nombre):
         sh = client.open("BASE_DATOS_PANDERO") 
         return sh.worksheet(hoja_nombre)
     except Exception as e:
-        st.error(f"Error Nube: {e}"); st.stop()
+        st.error(f"Error Conexión Nube: {e}")
+        st.stop()
 
-def cargar_df(hoja):
-    ws = conectar_db(hoja); data = ws.get_all_records()
-    return pd.DataFrame(data).astype(str)
+# --- FUNCION DE CARGA BLINDADA (ANTI-CRASH) ---
+def cargar_df(hoja, columnas_obligatorias):
+    ws = conectar_db(hoja)
+    
+    # Intentamos obtener registros
+    try:
+        data = ws.get_all_records()
+    except:
+        data = []
+
+    # Si está vacío o hubo error, verificamos si hay cabeceras
+    if not data:
+        # Verificar si la fila 1 está vacía
+        try:
+            headers = ws.row_values(1)
+            if not headers:
+                ws.append_row(columnas_obligatorias)
+        except:
+            pass # Si falla append, seguimos con DF vacío seguro
+        return pd.DataFrame(columns=columnas_obligatorias)
+    
+    # Creamos el DataFrame con lo que haya
+    df = pd.DataFrame(data).astype(str)
+    
+    # --- ESCUDO PROTECTOR ---
+    # Si por alguna razón falta una columna vital (ej: DNI), la creamos vacía
+    # Esto evita el KeyError que te salió antes
+    for col in columnas_obligatorias:
+        if col not in df.columns:
+            df[col] = "" 
+            
+    return df
 
 def guardar_df_completo(hoja, df):
-    ws = conectar_db(hoja); ws.clear()
+    ws = conectar_db(hoja)
+    ws.clear()
     ws.update([df.columns.values.tolist()] + df.values.tolist())
 
-# --- VARIABLES ---
-TAB_USUARIOS = 'usuarios'; TAB_GRUPOS = 'grupos'; TAB_MIEMBROS = 'miembros'; TAB_PAGOS = 'pagos'
+# --- VARIABLES Y COLUMNAS ---
+TAB_USUARIOS = 'usuarios'
+COLS_USUARIOS = ["Nombre", "DNI", "Celular"]
+
+TAB_GRUPOS = 'grupos'
+COLS_GRUPOS = ["NombreGrupo", "FechaInicio", "SemanasDuracion", "MontoBase", "MontoInteres"]
+
+TAB_MIEMBROS = 'miembros'
+COLS_MIEMBROS = ["NombreGrupo", "DNI_Usuario", "Turno", "Tipo"]
+
+TAB_PAGOS = 'pagos'
+COLS_PAGOS = ["Fecha", "DNI", "Grupo", "Monto", "Estado", "Foto", "SemanaPagada"]
 
 # --- UTILS ---
 def limpiar_fecha(fecha_str): return str(fecha_str).split(" ")[0]
@@ -71,8 +110,15 @@ def crear_reporte_pdf(nombre_grupo, datos_miembros):
 
 # --- CÁLCULOS ---
 def generar_calendario_usuario(dni_usuario):
-    df_m = cargar_df(TAB_MIEMBROS); df_g = cargar_df(TAB_GRUPOS); df_p = cargar_df(TAB_PAGOS)
+    df_m = cargar_df(TAB_MIEMBROS, COLS_MIEMBROS)
+    df_g = cargar_df(TAB_GRUPOS, COLS_GRUPOS)
+    df_p = cargar_df(TAB_PAGOS, COLS_PAGOS)
+    
     if df_m.empty: return [], "Sin Grupo", "Completo"
+    # Convertir DNI a string para asegurar coincidencia
+    df_m['DNI_Usuario'] = df_m['DNI_Usuario'].astype(str)
+    dni_usuario = str(dni_usuario)
+    
     fila = df_m[df_m['DNI_Usuario'] == dni_usuario]
     if fila.empty: return [], "Sin Grupo", "Completo"
     
@@ -107,11 +153,11 @@ def generar_calendario_usuario(dni_usuario):
         cal.append({"Semana": num, "Fecha": fecha.strftime("%d/%m"), "Monto": monto, "Estado": estado})
     return cal, grupo, tipo_p
 
-# --- ESTADOS DE NAVEGACIÓN ---
+# --- ESTADOS ---
 if 'usuario' not in st.session_state: st.session_state.usuario = None
-if 'login_step' not in st.session_state: st.session_state.login_step = 'dni' # dni, password, registro
+if 'login_step' not in st.session_state: st.session_state.login_step = 'dni'
 
-# --- BARRA LATERAL ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.title("🏛️ PANDERO")
     if st.session_state.usuario:
@@ -119,91 +165,56 @@ with st.sidebar:
         if st.button("Cerrar Sesión"):
             st.session_state.usuario = None; st.session_state.login_step = 'dni'; st.rerun()
 
-# 1. SISTEMA DE LOGIN UNIFICADO
+# 1. LOGIN UNIFICADO
 if st.session_state.usuario is None:
-    # Usamos columnas para centrar la caja de login
     c_izq, c_centro, c_der = st.columns([1, 2, 1])
-    
     with c_centro:
         st.markdown("<h2 style='text-align: center;'>Bienvenido</h2>", unsafe_allow_html=True)
         st.markdown("---")
 
-        # --- MODO REGISTRO ---
         if st.session_state.login_step == 'registro':
-            st.subheader("📝 Crear Nueva Cuenta")
+            st.subheader("📝 Registro")
             with st.form("form_registro"):
                 new_nombre = st.text_input("Nombre Completo")
-                new_dni = st.text_input("DNI (Será tu usuario)")
+                new_dni = st.text_input("DNI (Usuario)")
                 new_cel = st.text_input("Celular")
-                
                 if st.form_submit_button("Registrarme Ahora", type="primary", use_container_width=True):
                     if new_nombre and new_dni:
-                        df_u = cargar_df(TAB_USUARIOS)
-                        if new_dni in df_u['DNI'].values:
-                            st.error("Este DNI ya está registrado.")
+                        df_u = cargar_df(TAB_USUARIOS, COLS_USUARIOS)
+                        if new_dni in df_u['DNI'].values: st.error("DNI ya registrado.")
                         else:
-                            nuevo_usuario = pd.DataFrame([{"Nombre": new_nombre, "DNI": new_dni, "Celular": new_cel}])
-                            guardar_df_completo(TAB_USUARIOS, pd.concat([df_u, nuevo_usuario], ignore_index=True))
-                            st.success("¡Cuenta creada! Ahora puedes ingresar.")
-                            time.sleep(2)
-                            st.session_state.login_step = 'dni'
-                            st.rerun()
-                    else:
-                        st.warning("Llena todos los datos.")
-            
-            if st.button("⬅️ Volver al Ingreso"):
-                st.session_state.login_step = 'dni'
-                st.rerun()
+                            nuevo = pd.DataFrame([{"Nombre": new_nombre, "DNI": new_dni, "Celular": new_cel}])
+                            guardar_df_completo(TAB_USUARIOS, pd.concat([df_u, nuevo], ignore_index=True))
+                            st.success("¡Cuenta creada!"); time.sleep(2); st.session_state.login_step = 'dni'; st.rerun()
+                    else: st.warning("Faltan datos")
+            if st.button("⬅️ Volver"): st.session_state.login_step = 'dni'; st.rerun()
 
-        # --- MODO ADMIN PASSWORD ---
         elif st.session_state.login_step == 'password':
-            st.info("🔒 Modo Administrador")
-            pass_input = st.text_input("Ingresa tu Contraseña", type="password")
-            
-            col_a, col_b = st.columns(2)
-            if col_a.button("Acceder", type="primary", use_container_width=True):
+            st.info("🔒 Admin")
+            pass_input = st.text_input("Contraseña", type="password")
+            c_a, c_b = st.columns(2)
+            if c_a.button("Acceder", type="primary", use_container_width=True):
                 if pass_input == "admin123":
-                    st.session_state.usuario = "ADMIN"
-                    st.session_state.rol = 'admin'
-                    st.session_state.nombre_pila = "Administrador"
-                    st.rerun()
-                else:
-                    st.error("Contraseña incorrecta")
-            
-            if col_b.button("Cancelar", use_container_width=True):
-                st.session_state.login_step = 'dni'
-                st.rerun()
+                    st.session_state.usuario = "ADMIN"; st.session_state.rol = 'admin'; st.session_state.nombre_pila = "Admin"; st.rerun()
+                else: st.error("Incorrecto")
+            if c_b.button("Cancelar", use_container_width=True): st.session_state.login_step = 'dni'; st.rerun()
 
-        # --- MODO INGRESO DNI (DEFAULT) ---
         else: 
-            dni_input = st.text_input("Ingresa tu DNI para entrar")
-            
+            dni_input = st.text_input("Ingresa tu DNI")
             if st.button("Continuar", type="primary", use_container_width=True):
-                # Lógica inteligente
-                if dni_input.strip().upper() == "ADMIN":
-                    st.session_state.login_step = 'password'
-                    st.rerun()
+                if dni_input.strip().upper() == "ADMIN": st.session_state.login_step = 'password'; st.rerun()
                 else:
-                    # Buscar en BD
-                    df_u = cargar_df(TAB_USUARIOS)
-                    if not df_u.empty and dni_input in df_u['DNI'].values:
-                        st.session_state.usuario = dni_input
-                        st.session_state.rol = 'usuario'
-                        st.session_state.nombre_pila = df_u[df_u['DNI']==dni_input].iloc[0]['Nombre']
-                        st.rerun()
-                    else:
-                        st.error("❌ DNI no encontrado. Regístrate si eres nuevo.")
+                    df_u = cargar_df(TAB_USUARIOS, COLS_USUARIOS)
+                    if not df_u.empty and str(dni_input) in df_u['DNI'].values:
+                        st.session_state.usuario = str(dni_input); st.session_state.rol = 'usuario'
+                        st.session_state.nombre_pila = df_u[df_u['DNI']==str(dni_input)].iloc[0]['Nombre']; st.rerun()
+                    else: st.error("DNI no encontrado.")
+            st.markdown(" "); st.markdown("<p style='text-align: center;'>¿Nuevo?</p>", unsafe_allow_html=True)
+            if st.button("Crear Cuenta", use_container_width=True): st.session_state.login_step = 'registro'; st.rerun()
 
-            st.markdown(" ")
-            st.markdown("<p style='text-align: center;'>¿No tienes cuenta?</p>", unsafe_allow_html=True)
-            if st.button("Crear Cuenta Nueva", use_container_width=True):
-                st.session_state.login_step = 'registro'
-                st.rerun()
-
-# 2. PANEL ADMIN
+# 2. ADMIN
 elif st.session_state.rol == 'admin':
     if 'grupo_sel' not in st.session_state: st.session_state.grupo_sel = None
-    
     if not st.session_state.grupo_sel:
         st.header("Panel de Control")
         with st.expander("➕ Crear Nuevo Grupo"):
@@ -212,13 +223,12 @@ elif st.session_state.rol == 'admin':
             c3, c4, c5 = st.columns(3)
             d = c3.number_input("Semanas", 1, 50, 25); mb = c4.number_input("Base", 400.0); mi = c5.number_input("Interés", 430.0)
             if st.button("Crear"):
-                df_g = cargar_df(TAB_GRUPOS)
+                df_g = cargar_df(TAB_GRUPOS, COLS_GRUPOS)
                 if not df_g.empty and n_nuevo in df_g['NombreGrupo'].values: st.error("Existe")
                 else:
                     new = pd.DataFrame([{"NombreGrupo":n_nuevo, "FechaInicio":str(f_nuevo), "SemanasDuracion":d, "MontoBase":mb, "MontoInteres":mi}])
                     guardar_df_completo(TAB_GRUPOS, pd.concat([df_g, new], ignore_index=True)); st.success("Hecho"); st.rerun()
-        
-        df_g = cargar_df(TAB_GRUPOS)
+        df_g = cargar_df(TAB_GRUPOS, COLS_GRUPOS)
         if not df_g.empty:
             cols = st.columns(3)
             for i, r in df_g.iterrows():
@@ -226,15 +236,14 @@ elif st.session_state.rol == 'admin':
                     st.info(f"📁 {r['NombreGrupo']}")
                     if st.button(f"Entrar {r['NombreGrupo']}"): st.session_state.grupo_sel = r['NombreGrupo']; st.rerun()
         else: st.info("No hay grupos.")
-        
     else:
         grupo = st.session_state.grupo_sel
         if st.button("⬅️ Volver"): st.session_state.grupo_sel = None; st.rerun()
         st.title(f"Gestión: {grupo}")
         t1, t2, t3, t4, t5, t6 = st.tabs(["Miembros", "Inscribir", "Sorteo", "Ajustes", "Pagos", "Reportes"])
         
-        with t1: # MIEMBROS
-            df_m = cargar_df(TAB_MIEMBROS); df_u = cargar_df(TAB_USUARIOS)
+        with t1:
+            df_m = cargar_df(TAB_MIEMBROS, COLS_MIEMBROS); df_u = cargar_df(TAB_USUARIOS, COLS_USUARIOS)
             mis_m = df_m[df_m['NombreGrupo']==grupo]
             if not mis_m.empty:
                 mis_m['TurnoNum'] = pd.to_numeric(mis_m['Turno'], errors='coerce').fillna(0)
@@ -246,7 +255,7 @@ elif st.session_state.rol == 'admin':
                     tag = '½' if r['Tipo']=='Medio' else ''
                     with st.expander(f"T{r['Turno']} | {'🔴' if deuda>0 else '🟢'} {r['Nombre']} {tag}"):
                         c1, c2 = st.columns([3,1])
-                        c1.write(f"DNI: {r['DNI']} | Deuda: {deuda}")
+                        c1.write(f"DNI: {r['DNI']} | Deuda: {deuda}"); c1.markdown(f"[📲 WhatsApp](https://wa.me/?text=Hola%20{r['Nombre']})")
                         c2.metric("Pagado", f"S/. {sum(c['Monto'] for c in cal if c['Estado']=='green')}")
                         dfv = pd.DataFrame(cal)[['Semana','Fecha','Monto','Estado']]
                         dfv['Monto'] = dfv['Monto'].apply(lambda x: f"S/. {x:.2f}")
@@ -254,40 +263,39 @@ elif st.session_state.rol == 'admin':
                         st.dataframe(dfv, hide_index=True, use_container_width=True)
             else: st.info("Sin miembros")
             
-        with t2: # INSCRIBIR
-            st.write("Inscribir Socio Existente")
+        with t2:
+            st.write("Inscribir Socio")
             busq = st.text_input("Buscar DNI/Nombre")
-            df_u = cargar_df(TAB_USUARIOS)
+            df_u = cargar_df(TAB_USUARIOS, COLS_USUARIOS)
             if not df_u.empty:
                 filtro = df_u[df_u['Nombre'].str.contains(busq, case=False)|df_u['DNI'].astype(str).str.contains(busq)] if busq else df_u
                 sel = st.selectbox("Seleccionar", filtro['DNI'] + " - " + filtro['Nombre'])
                 c1, c2 = st.columns(2)
                 turn = c1.number_input("Turno", 1, 50); medio = c2.checkbox("Medio Turno")
-                if st.button("Inscribir en Grupo"):
+                if st.button("Inscribir"):
                     dni = sel.split(" - ")[0]
-                    df_mm = cargar_df(TAB_MIEMBROS)
+                    df_mm = cargar_df(TAB_MIEMBROS, COLS_MIEMBROS)
                     if df_mm[(df_mm['NombreGrupo']==grupo)&(df_mm['DNI_Usuario']==dni)].empty:
                         new = pd.DataFrame([{"NombreGrupo":grupo, "DNI_Usuario":dni, "Turno":turn, "Tipo":'Medio' if medio else 'Completo'}])
                         guardar_df_completo(TAB_MIEMBROS, pd.concat([df_mm, new], ignore_index=True))
                         st.success("Inscrito"); st.rerun()
                     else: st.error("Ya está")
 
-        with t3: # SORTEO
+        with t3:
             if st.button("🎲 Sortear Turnos"):
-                df_mm = cargar_df(TAB_MIEMBROS)
+                df_mm = cargar_df(TAB_MIEMBROS, COLS_MIEMBROS)
                 idxs = df_mm.index[df_mm['NombreGrupo']==grupo].tolist()
                 if idxs:
                     ts = list(range(1, len(idxs)+1)); random.shuffle(ts)
                     for i, x in enumerate(idxs): df_mm.at[x, 'Turno'] = ts[i]
                     guardar_df_completo(TAB_MIEMBROS, df_mm); st.success("Listo!"); st.balloons()
 
-        with t4: # AJUSTES
-            st.info("Para editar fechas o montos, edita directamente el Google Sheet pestaña 'grupos'")
+        with t4: st.info("Edita directo en Google Sheets si necesitas cambios complejos.")
 
-        with t5: # PAGOS
+        with t5:
             st.subheader("Validación")
             t_rev, t_man = st.tabs(["Con Foto", "Manual"])
-            df_p = cargar_df(TAB_PAGOS); df_u = cargar_df(TAB_USUARIOS)
+            df_p = cargar_df(TAB_PAGOS, COLS_PAGOS); df_u = cargar_df(TAB_USUARIOS, COLS_USUARIOS)
             with t_rev:
                 pend = df_p[(df_p['Grupo']==grupo)&(df_p['Estado']=='Pendiente')]
                 if not pend.empty:
@@ -295,7 +303,7 @@ elif st.session_state.rol == 'admin':
                     for idx, r in view.iterrows():
                         with st.container(border=True):
                             c1, c2 = st.columns(2)
-                            c1.write(f"**{r['Nombre']}** | {r['SemanaPagada']}")
+                            c1.write(f"**{r['Nombre']}** | {r.get('SemanaPagada')}")
                             c1.write(f"Monto: S/. {r['Monto']}")
                             c1.info("📸 Foto recibida")
                             if c2.button("✅", key=f"y{idx}"):
@@ -309,14 +317,21 @@ elif st.session_state.rol == 'admin':
                 else: st.info("Nada pendiente")
             with t_man:
                 sel_m = st.selectbox("Socio Manual", df_u['DNI']+"-"+df_u['Nombre'])
-                if sel_m and st.button("Registrar Pago Efectivo"):
+                if sel_m:
                     dni_m = sel_m.split("-")[0]
-                    new = pd.DataFrame([{"Fecha":datetime.now().strftime("%Y-%m-%d"), "DNI":dni_m, "Grupo":grupo, "Monto":"400.0", "Estado":"Aprobado", "Foto":"Manual", "SemanaPagada":"Manual"}])
-                    guardar_df_completo(TAB_PAGOS, pd.concat([df_p, new], ignore_index=True)); st.success("Registrado"); st.rerun()
+                    cal_m, _, _ = generar_calendario_usuario(dni_m)
+                    ops_m = [f"Semana {s['Semana']}" for s in cal_m if s['Estado']!='green']
+                    if ops_m:
+                        sem_m = st.selectbox("Semana Manual", ops_m)
+                        mon_m = st.number_input("Monto Efec.", 0.0)
+                        if st.button("Registrar Efectivo"):
+                            new = pd.DataFrame([{"Fecha":datetime.now().strftime("%Y-%m-%d"), "DNI":dni_m, "Grupo":grupo, "Monto":str(mon_m), "Estado":"Aprobado", "Foto":"Manual", "SemanaPagada":sem_m}])
+                            guardar_df_completo(TAB_PAGOS, pd.concat([df_p, new], ignore_index=True)); st.success("Registrado"); st.rerun()
+                    else: st.success("Ya pagó todo.")
 
-        with t6: # REPORTES
+        with t6:
             if st.button("PDF"):
-                df_mm = cargar_df(TAB_MIEMBROS); df_u = cargar_df(TAB_USUARIOS)
+                df_mm = cargar_df(TAB_MIEMBROS, COLS_MIEMBROS); df_u = cargar_df(TAB_USUARIOS, COLS_USUARIOS)
                 mism = df_mm[df_mm['NombreGrupo']==grupo]
                 dat = pd.merge(mism, df_u, left_on="DNI_Usuario", right_on="DNI")
                 rep = []
@@ -335,7 +350,7 @@ elif st.session_state.rol == 'usuario':
     cal, nom_g, tipo_p = generar_calendario_usuario(st.session_state.usuario)
     if cal:
         st.info(f"Grupo: {nom_g} ({tipo_p})")
-        df_p = cargar_df(TAB_PAGOS)
+        df_p = cargar_df(TAB_PAGOS, COLS_PAGOS)
         rech = df_p[(df_p['DNI']==st.session_state.usuario)&(df_p['Estado']=='Rechazado')]
         if not rech.empty: st.error(f"⚠️ Tienes {len(rech)} pago(s) rechazados.")
         
