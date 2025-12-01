@@ -53,16 +53,13 @@ def conectar_db(hoja_nombre):
         st.error(f"⚠️ Error de conexión (Espera 1 min): {e}")
         st.stop()
 
-# --- FUNCION DE CARGA CON CACHÉ (SOLUCIÓN ERROR 429) ---
-# ttl=60: Mantiene los datos en memoria 60 segundos antes de volver a llamar a Google
+# --- CARGA CON CACHÉ ---
 @st.cache_data(ttl=60, show_spinner=False)
 def cargar_df(hoja, columnas_obligatorias):
-    # Usamos try/except para manejar errores de conexión silenciosamente
     try:
         ws = conectar_db(hoja)
         data = ws.get_all_records()
-    except:
-        return pd.DataFrame(columns=columnas_obligatorias)
+    except: return pd.DataFrame(columns=columnas_obligatorias)
 
     if not data:
         try: 
@@ -78,13 +75,10 @@ def cargar_df(hoja, columnas_obligatorias):
 
 def guardar_df_completo(hoja, df):
     try:
-        ws = conectar_db(hoja)
-        ws.clear()
+        ws = conectar_db(hoja); ws.clear()
         ws.update([df.columns.values.tolist()] + df.values.tolist())
-        # IMPORTANTE: Limpiamos la caché para que se vean los cambios
         st.cache_data.clear()
-    except Exception as e:
-        st.error(f"No se pudo guardar: {e}")
+    except Exception as e: st.error(f"Error guardando: {e}")
 
 # --- VARIABLES ---
 TAB_USUARIOS = 'usuarios'; COLS_USUARIOS = ["Nombre", "DNI", "Celular"]
@@ -109,20 +103,32 @@ def crear_reporte_pdf(nombre_grupo, datos_miembros):
         pdf.cell(30, 10, "DEUDA" if m['Deuda'] > 0 else "OK", 1, 1, 'C'); pdf.set_text_color(0)
     return pdf.output(dest='S').encode('latin-1')
 
-# --- CÁLCULOS ---
-def generar_calendario_usuario(dni_usuario):
+# --- CÁLCULOS MODIFICADOS PARA SOPORTAR GRUPO ESPECÍFICO ---
+def generar_calendario_usuario(dni_usuario, nombre_grupo_objetivo=None):
     df_m = cargar_df(TAB_MIEMBROS, COLS_MIEMBROS); df_g = cargar_df(TAB_GRUPOS, COLS_GRUPOS); df_p = cargar_df(TAB_PAGOS, COLS_PAGOS)
+    
     if df_m.empty: return [], "Sin Grupo", "Completo"
     df_m['DNI_Usuario'] = df_m['DNI_Usuario'].astype(str); dni_usuario = str(dni_usuario)
-    fila = df_m[df_m['DNI_Usuario'] == dni_usuario]
-    if fila.empty: return [], "Sin Grupo", "Completo"
     
-    dat_m = fila.iloc[0]; grupo = dat_m['NombreGrupo']
+    # FILTRO: Buscar todos los grupos del usuario o uno específico
+    mis_filas = df_m[df_m['DNI_Usuario'] == dni_usuario]
+    if mis_filas.empty: return [], "Sin Grupo", "Completo"
+    
+    # Si no nos dan un grupo objetivo, tomamos el primero (comportamiento default)
+    # Si nos dan uno, filtramos por ese
+    if nombre_grupo_objetivo:
+        fila_target = mis_filas[mis_filas['NombreGrupo'] == nombre_grupo_objetivo]
+        if fila_target.empty: return [], "No inscrito en este grupo", "Completo"
+        dat_m = fila_target.iloc[0]
+    else:
+        dat_m = mis_filas.iloc[0] # Fallback al primero
+    
+    grupo = dat_m['NombreGrupo']
     try: turno = int(float(dat_m.get('Turno', 0)))
     except: turno = 0
     tipo_p = dat_m.get('Tipo', 'Completo'); factor = 0.5 if tipo_p == 'Medio' else 1.0
     
-    # Check si grupo existe
+    # Datos del Grupo
     g_idx = df_g[df_g['NombreGrupo'] == grupo]
     if g_idx.empty: return [], "Grupo Eliminado", "Completo"
     
@@ -163,7 +169,7 @@ with st.sidebar:
         if st.button("Cerrar Sesión"):
             st.session_state.usuario = None; st.session_state.login_step = 'dni'; st.rerun()
 
-# 1. LOGIN
+# 1. LOGIN UNIFICADO
 if st.session_state.usuario is None:
     c_izq, c_centro, c_der = st.columns([1, 2, 1])
     with c_centro:
@@ -241,7 +247,7 @@ elif st.session_state.rol == 'admin':
                 mis_m = mis_m.sort_values(by='TurnoNum')
                 dat = pd.merge(mis_m, df_u, left_on="DNI_Usuario", right_on="DNI")
                 for _, r in dat.iterrows():
-                    cal, _, _ = generar_calendario_usuario(r['DNI'])
+                    cal, _, _ = generar_calendario_usuario(r['DNI'], grupo) # <-- Pasamos el grupo explícito
                     deuda = sum(1 for c in cal if c['Estado']=='red')
                     tag = '½' if r['Tipo']=='Medio' else ''
                     with st.expander(f"T{r['Turno']} | {'🔴' if deuda>0 else '🟢'} {r['Nombre']} {tag}"):
@@ -308,7 +314,7 @@ elif st.session_state.rol == 'admin':
             with t_man:
                 sel_m = st.selectbox("Socio Manual", df_u['DNI']+"-"+df_u['Nombre'])
                 if sel_m:
-                    dni_m = sel_m.split("-")[0]; cal_m, _, _ = generar_calendario_usuario(dni_m)
+                    dni_m = sel_m.split("-")[0]; cal_m, _, _ = generar_calendario_usuario(dni_m, grupo)
                     ops_m = [f"Semana {s['Semana']}" for s in cal_m if s['Estado']!='green']
                     if ops_m:
                         sem_m = st.selectbox("Semana Manual", ops_m); mon_m = st.number_input("Monto Efec.", 0.0)
@@ -323,7 +329,7 @@ elif st.session_state.rol == 'admin':
                 dat = pd.merge(mism, df_u, left_on="DNI_Usuario", right_on="DNI")
                 rep = []
                 for _, r in dat.iterrows():
-                    cal, _, _ = generar_calendario_usuario(r['DNI'])
+                    cal, _, _ = generar_calendario_usuario(r['DNI'], grupo)
                     deuda = sum(1 for c in cal if c['Estado']=='red')
                     pag = sum(c['Monto'] for c in cal if c['Estado']=='green')
                     rep.append({"Nombre":r['Nombre'], "Turno":r['Turno'], "Pagado":pag, "Deuda":deuda})
@@ -334,35 +340,55 @@ elif st.session_state.rol == 'admin':
 # 3. USUARIO
 elif st.session_state.rol == 'usuario':
     st.title(f"Hola, {st.session_state.nombre_pila}")
-    cal, nom_g, tipo_p = generar_calendario_usuario(st.session_state.usuario)
-    if cal:
-        st.info(f"Grupo: {nom_g} ({tipo_p})")
-        df_p = cargar_df(TAB_PAGOS, COLS_PAGOS)
-        rech = df_p[(df_p['DNI']==st.session_state.usuario)&(df_p['Estado']=='Rechazado')]
-        if not rech.empty: st.error(f"⚠️ Tienes {len(rech)} pago(s) RECHAZADO(S).")
-        dfv = pd.DataFrame(cal)[['Semana','Fecha','Monto','Estado']]
-        dfv['Monto'] = dfv['Monto'].apply(lambda x: f"S/. {x:.2f}")
-        dfv['Estado'] = dfv['Estado'].map({'red':'🔴','green':'🟢','grey':'⚪','orange':'🟠','yellow':'🟡'})
-        st.dataframe(dfv, hide_index=True, use_container_width=True)
-        with st.form("pay", clear_on_submit=True):
-            ops = [f"Semana {s['Semana']} ({s['Fecha']})" for s in cal if s['Estado']!='green']
-            if ops:
-                sem = st.selectbox("Semana", ops); monto = st.number_input("Monto (S/.)", 0.0)
-                uploaded = st.file_uploader("Voucher")
-                if st.form_submit_button("Enviar Pago"):
-                    if uploaded and monto > 0:
-                        try:
-                            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-                            nombre_archivo = f"S{sem.split()[1]}_{timestamp}"
-                            folder_path = f"PANDEROS/{st.session_state.usuario}/{nom_g}"
-                            upload_result = cloudinary.uploader.upload(uploaded, folder=folder_path, public_id=nombre_archivo)
-                            link_foto = upload_result['secure_url']
-                            new = pd.DataFrame([{"Fecha":datetime.now().strftime("%Y-%m-%d"), "DNI":st.session_state.usuario, "Grupo":nom_g, "Monto":str(monto), "Estado":"Pendiente", "Foto":link_foto, "SemanaPagada":sem}])
-                            guardar_df_completo(TAB_PAGOS, pd.concat([df_p, new], ignore_index=True))
-                            st.success("Enviado ✅"); time.sleep(2); st.rerun()
-                        except Exception as e: st.error(f"Error imagen: {e}")
-                    else: st.error("Completa todo")
-            else: st.success("¡Felicidades! Pagaste todo.")
-
-    else: st.warning("Sin grupo")
-
+    
+    # 1. Obtener TODOS los grupos donde está el usuario
+    df_m = cargar_df(TAB_MIEMBROS, COLS_MIEMBROS)
+    # Filtramos por DNI
+    mis_grupos_rows = df_m[df_m['DNI_Usuario'] == str(st.session_state.usuario)]
+    
+    if not mis_grupos_rows.empty:
+        lista_nombres_grupos = mis_grupos_rows['NombreGrupo'].unique().tolist()
+        
+        # 2. SELECTOR DE GRUPO (Si tiene más de 1)
+        grupo_seleccionado = lista_nombres_grupos[0] # Por defecto el primero
+        if len(lista_nombres_grupos) > 1:
+            grupo_seleccionado = st.selectbox("📂 Selecciona el Pandero que quieres ver:", lista_nombres_grupos)
+        
+        # 3. Generar info SOLO para el grupo seleccionado
+        cal, nom_g, tipo_p = generar_calendario_usuario(st.session_state.usuario, grupo_seleccionado)
+        
+        if cal:
+            st.info(f"Viendo: **{nom_g}** ({tipo_p})")
+            
+            # Alertas
+            df_p = cargar_df(TAB_PAGOS, COLS_PAGOS)
+            rech = df_p[(df_p['DNI']==st.session_state.usuario)&(df_p['Estado']=='Rechazado')&(df_p['Grupo']==nom_g)]
+            if not rech.empty: st.error(f"⚠️ Tienes {len(rech)} pago(s) RECHAZADO(S) en este grupo.")
+            
+            dfv = pd.DataFrame(cal)[['Semana','Fecha','Monto','Estado']]
+            dfv['Monto'] = dfv['Monto'].apply(lambda x: f"S/. {x:.2f}")
+            dfv['Estado'] = dfv['Estado'].map({'red':'🔴','green':'🟢','grey':'⚪','orange':'🟠','yellow':'🟡'})
+            st.dataframe(dfv, hide_index=True, use_container_width=True)
+            
+            with st.form("pay", clear_on_submit=True):
+                ops = [f"Semana {s['Semana']} ({s['Fecha']})" for s in cal if s['Estado']!='green']
+                if ops:
+                    sem = st.selectbox("Semana", ops)
+                    monto = st.number_input("Monto (S/.)", 0.0)
+                    uploaded = st.file_uploader("Voucher")
+                    if st.form_submit_button("Enviar Pago"):
+                        if uploaded and monto > 0:
+                            try:
+                                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+                                nombre_archivo = f"S{sem.split()[1]}_{timestamp}"
+                                folder_path = f"PANDEROS/{st.session_state.usuario}/{nom_g}"
+                                upload_result = cloudinary.uploader.upload(uploaded, folder=folder_path, public_id=nombre_archivo)
+                                link_foto = upload_result['secure_url']
+                                new = pd.DataFrame([{"Fecha":datetime.now().strftime("%Y-%m-%d"), "DNI":st.session_state.usuario, "Grupo":nom_g, "Monto":str(monto), "Estado":"Pendiente", "Foto":link_foto, "SemanaPagada":sem}])
+                                guardar_df_completo(TAB_PAGOS, pd.concat([df_p, new], ignore_index=True))
+                                st.success("Enviado ✅"); time.sleep(2); st.rerun()
+                            except Exception as e: st.error(f"Error imagen: {e}")
+                        else: st.error("Completa todo")
+                else: st.success("¡Felicidades! Pagaste todo este pandero.")
+    else:
+        st.warning("No estás inscrito en ningún grupo todavía. Contacta al Admin.")
