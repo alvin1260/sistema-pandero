@@ -28,7 +28,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- CONEXIÓN CLOUDINARY (FOTOS) ---
+# --- CONEXIÓN CLOUDINARY ---
 def init_cloudinary():
     try:
         cloudinary.config(
@@ -37,13 +37,10 @@ def init_cloudinary():
             api_secret = st.secrets["cloudinary"]["api_secret"],
             secure = True
         )
-    except Exception as e:
-        # Si falla en local por falta de secrets, no rompe, pero avisa
-        print(f"Cloudinary no configurado: {e}")
-
+    except: pass
 init_cloudinary()
 
-# --- CONEXIÓN GOOGLE SHEETS (DATOS) ---
+# --- CONEXIÓN GOOGLE SHEETS ---
 def conectar_db(hoja_nombre):
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -53,27 +50,41 @@ def conectar_db(hoja_nombre):
         sh = client.open("BASE_DATOS_PANDERO") 
         return sh.worksheet(hoja_nombre)
     except Exception as e:
-        st.error(f"Error Conexión Nube: {e}"); st.stop()
+        st.error(f"⚠️ Error de conexión (Espera 1 min): {e}")
+        st.stop()
 
-# --- FUNCION DE CARGA BLINDADA ---
+# --- FUNCION DE CARGA CON CACHÉ (SOLUCIÓN ERROR 429) ---
+# ttl=60: Mantiene los datos en memoria 60 segundos antes de volver a llamar a Google
+@st.cache_data(ttl=60, show_spinner=False)
 def cargar_df(hoja, columnas_obligatorias):
-    ws = conectar_db(hoja)
-    try: data = ws.get_all_records()
-    except: data = []
+    # Usamos try/except para manejar errores de conexión silenciosamente
+    try:
+        ws = conectar_db(hoja)
+        data = ws.get_all_records()
+    except:
+        return pd.DataFrame(columns=columnas_obligatorias)
+
     if not data:
         try: 
             headers = ws.row_values(1)
             if not headers: ws.append_row(columnas_obligatorias)
         except: pass
         return pd.DataFrame(columns=columnas_obligatorias)
+    
     df = pd.DataFrame(data).astype(str)
     for col in columnas_obligatorias:
         if col not in df.columns: df[col] = "" 
     return df
 
 def guardar_df_completo(hoja, df):
-    ws = conectar_db(hoja); ws.clear()
-    ws.update([df.columns.values.tolist()] + df.values.tolist())
+    try:
+        ws = conectar_db(hoja)
+        ws.clear()
+        ws.update([df.columns.values.tolist()] + df.values.tolist())
+        # IMPORTANTE: Limpiamos la caché para que se vean los cambios
+        st.cache_data.clear()
+    except Exception as e:
+        st.error(f"No se pudo guardar: {e}")
 
 # --- VARIABLES ---
 TAB_USUARIOS = 'usuarios'; COLS_USUARIOS = ["Nombre", "DNI", "Celular"]
@@ -111,7 +122,11 @@ def generar_calendario_usuario(dni_usuario):
     except: turno = 0
     tipo_p = dat_m.get('Tipo', 'Completo'); factor = 0.5 if tipo_p == 'Medio' else 1.0
     
-    dat_g = df_g[df_g['NombreGrupo'] == grupo].iloc[0]
+    # Check si grupo existe
+    g_idx = df_g[df_g['NombreGrupo'] == grupo]
+    if g_idx.empty: return [], "Grupo Eliminado", "Completo"
+    
+    dat_g = g_idx.iloc[0]
     inicio = datetime.strptime(limpiar_fecha(dat_g['FechaInicio']), "%Y-%m-%d")
     duracion = int(float(dat_g['SemanasDuracion']))
     base = float(dat_g.get('MontoBase', 400)) * factor; interes = float(dat_g.get('MontoInteres', 430)) * factor
@@ -246,9 +261,8 @@ elif st.session_state.rol == 'admin':
                 filtro = df_u[df_u['Nombre'].str.contains(busq, case=False)|df_u['DNI'].astype(str).str.contains(busq)] if busq else df_u
                 sel = st.selectbox("Seleccionar", filtro['DNI'] + " - " + filtro['Nombre'])
                 c1, c2 = st.columns(2)
-                # Max value dinámico:
-                df_g = cargar_df(TAB_GRUPOS, COLS_GRUPOS)
-                dur = int(float(df_g[df_g['NombreGrupo']==grupo].iloc[0]['SemanasDuracion']))
+                df_g_curr = cargar_df(TAB_GRUPOS, COLS_GRUPOS)
+                dur = int(float(df_g_curr[df_g_curr['NombreGrupo']==grupo].iloc[0]['SemanasDuracion']))
                 turn = c1.number_input("Turno", 1, dur); medio = c2.checkbox("Medio Turno")
                 if st.button("Inscribir"):
                     dni = sel.split(" - ")[0]
@@ -280,10 +294,8 @@ elif st.session_state.rol == 'admin':
                             c1, c2 = st.columns(2)
                             c1.write(f"**{r['Nombre']}** | {r.get('SemanaPagada')}")
                             c1.write(f"Monto: S/. {r['Monto']}")
-                            # VISUALIZAR IMAGEN DESDE CLOUDINARY
                             if str(r['Foto']).startswith('http'): c1.image(r['Foto'], use_container_width=True)
-                            else: c1.warning("Foto local (no visible en nube)")
-                            
+                            else: c1.warning("Foto local")
                             if c2.button("✅", key=f"y{idx}"):
                                 mask = (df_p['DNI']==r['DNI'])&(df_p['Fecha']==r['Fecha'])&(df_p['Monto']==r['Monto'])
                                 df_p.at[df_p[mask].index[0], 'Estado']='Aprobado'
@@ -322,59 +334,33 @@ elif st.session_state.rol == 'admin':
 # 3. USUARIO
 elif st.session_state.rol == 'usuario':
     st.title(f"Hola, {st.session_state.nombre_pila}")
-    df_alertas = cargar_df(TAB_PAGOS, COLS_PAGOS)
-    rech = df_alertas[(df_alertas['DNI']==st.session_state.usuario)&(df_alertas['Estado']=='Rechazado')]
-    if not rech.empty: st.error(f"⚠️ Tienes {len(rech)} pago(s) RECHAZADO(S).")
-    
     cal, nom_g, tipo_p = generar_calendario_usuario(st.session_state.usuario)
     if cal:
-        st.caption(f"Grupo: {nom_g} | Participación: {tipo_p}")
-        c1, c2 = st.columns([2,1])
-        with c1:
-            for s in cal:
-                clr = {'green':'#2ecc71','red':'#e74c3c','orange':'#f39c12','yellow':'#f1c40f','grey':'#555'}[s['Estado']]
-                st.markdown(f"""<div class="user-week-card" style="border-left-color:{clr}">
-                <div><strong>Semana {s['Semana']}</strong><br><small style="color:#aaa">{s['Fecha']}</small></div>
-                <div style="font-size:18px">S/. {s['Monto']:.2f}</div></div>""", unsafe_allow_html=True)
-        with c2:
-            st.container(border=True).write("### Pagar Cuota")
-            with st.form("pay", clear_on_submit=True):
-                ops = [f"Semana {s['Semana']} ({s['Fecha']})" for s in cal if s['Estado']!='green']
-                if ops:
-                    sem = st.selectbox("Semana", ops)
-                    monto = st.number_input("Monto (S/.)", 0.0)
-                    uploaded = st.file_uploader("Voucher")
-                    if st.form_submit_button("Enviar Pago"):
-                        if uploaded and monto > 0:
-                            # --- SUBIDA A CLOUDINARY ---
-                            try:
-                                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-                                nombre_archivo = f"S{sem.split()[1]}_{timestamp}"
-                                # Crear estructura de carpeta organizada
-                                folder_path = f"PANDEROS/{st.session_state.usuario}/{nom_g}"
-                                
-                                upload_result = cloudinary.uploader.upload(
-                                    uploaded, 
-                                    folder=folder_path,
-                                    public_id=nombre_archivo
-                                )
-                                link_foto = upload_result['secure_url']
-                                
-                                # Guardar en BD
-                                df_p = cargar_df(TAB_PAGOS, COLS_PAGOS)
-                                new = pd.DataFrame([{
-                                    "Fecha":datetime.now().strftime("%Y-%m-%d"), 
-                                    "DNI":st.session_state.usuario, 
-                                    "Grupo":nom_g, 
-                                    "Monto":str(monto), 
-                                    "Estado":"Pendiente", 
-                                    "Foto": link_foto, # <-- LINK NUBE
-                                    "SemanaPagada":sem
-                                }])
-                                guardar_df_completo(TAB_PAGOS, pd.concat([df_p, new], ignore_index=True))
-                                st.success("Enviado ✅"); time.sleep(2); st.rerun()
-                            except Exception as e:
-                                st.error(f"Error al subir imagen: {e}")
-                        else: st.error("Completa todo")
-                else: st.success("¡Felicidades! Pagaste todo.")
+        st.info(f"Grupo: {nom_g} ({tipo_p})")
+        df_p = cargar_df(TAB_PAGOS, COLS_PAGOS)
+        rech = df_p[(df_p['DNI']==st.session_state.usuario)&(df_p['Estado']=='Rechazado')]
+        if not rech.empty: st.error(f"⚠️ Tienes {len(rech)} pago(s) RECHAZADO(S).")
+        dfv = pd.DataFrame(cal)[['Semana','Fecha','Monto','Estado']]
+        dfv['Monto'] = dfv['Monto'].apply(lambda x: f"S/. {x:.2f}")
+        dfv['Estado'] = dfv['Estado'].map({'red':'🔴','green':'🟢','grey':'⚪','orange':'🟠','yellow':'🟡'})
+        st.dataframe(dfv, hide_index=True, use_container_width=True)
+        with st.form("pay", clear_on_submit=True):
+            ops = [f"Semana {s['Semana']} ({s['Fecha']})" for s in cal if s['Estado']!='green']
+            if ops:
+                sem = st.selectbox("Semana", ops); monto = st.number_input("Monto (S/.)", 0.0)
+                uploaded = st.file_uploader("Voucher")
+                if st.form_submit_button("Enviar Pago"):
+                    if uploaded and monto > 0:
+                        try:
+                            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+                            nombre_archivo = f"S{sem.split()[1]}_{timestamp}"
+                            folder_path = f"PANDEROS/{st.session_state.usuario}/{nom_g}"
+                            upload_result = cloudinary.uploader.upload(uploaded, folder=folder_path, public_id=nombre_archivo)
+                            link_foto = upload_result['secure_url']
+                            new = pd.DataFrame([{"Fecha":datetime.now().strftime("%Y-%m-%d"), "DNI":st.session_state.usuario, "Grupo":nom_g, "Monto":str(monto), "Estado":"Pendiente", "Foto":link_foto, "SemanaPagada":sem}])
+                            guardar_df_completo(TAB_PAGOS, pd.concat([df_p, new], ignore_index=True))
+                            st.success("Enviado ✅"); time.sleep(2); st.rerun()
+                        except Exception as e: st.error(f"Error imagen: {e}")
+                    else: st.error("Completa todo")
+            else: st.success("¡Felicidades! Pagaste todo.")
     else: st.warning("Sin grupo")
